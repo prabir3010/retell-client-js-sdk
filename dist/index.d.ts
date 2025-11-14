@@ -18,6 +18,8 @@ export declare class RetellWebClient extends EventEmitter {
     };
     private captureAudioFrame;
     private audioContext?;
+    private audioTrackCounter;
+    private currentAudioPublication?;
     constructor();
     startCall(startCallConfig: StartCallConfig): Promise<void>;
     startAudioPlayback(): Promise<void>;

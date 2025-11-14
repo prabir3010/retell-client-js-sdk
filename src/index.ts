@@ -43,6 +43,12 @@ export class RetellWebClient extends EventEmitter {
   
   // AudioContext for simulation mode - reused across multiple sendAudioBuffer calls
   private audioContext?: AudioContext;
+  
+  // Track counter for unique track names
+  private audioTrackCounter: number = 0;
+  
+  // Store current audio track publication for cleanup
+  private currentAudioPublication?: any;
 
   constructor() {
     super();
@@ -122,11 +128,24 @@ export class RetellWebClient extends EventEmitter {
       delete this.captureAudioFrame;
     }
 
+    // Unpublish current audio track if it exists
+    if (this.currentAudioPublication) {
+      try {
+        this.room.localParticipant.unpublishTrack(this.currentAudioPublication.track);
+      } catch (err) {
+        console.warn("Error unpublishing track on stopCall", err);
+      }
+      delete this.currentAudioPublication;
+    }
+
     // Close AudioContext if it exists
     if (this.audioContext && this.audioContext.state !== "closed") {
       this.audioContext.close();
       delete this.audioContext;
     }
+
+    // Reset counter
+    this.audioTrackCounter = 0;
   }
 
   public mute(): void {
@@ -147,6 +166,17 @@ export class RetellWebClient extends EventEmitter {
     }
 
     try {
+      // Unpublish previous track if it exists to avoid conflicts
+      if (this.currentAudioPublication) {
+        try {
+          await this.room.localParticipant.unpublishTrack(this.currentAudioPublication.track);
+          console.log("Unpublished previous audio track");
+        } catch (err) {
+          console.warn("Error unpublishing previous track", err);
+        }
+        this.currentAudioPublication = undefined;
+      }
+
       // Resume AudioContext if suspended (browser autoplay policy)
       if (this.audioContext.state === "suspended") {
         await this.audioContext.resume();
@@ -170,13 +200,22 @@ export class RetellWebClient extends EventEmitter {
         throw new Error("Failed to create audio track from buffer");
       }
 
+      // Generate unique track name to avoid conflicts
+      const trackName = `simulated_audio_${this.audioTrackCounter++}`;
+
       // Publish the track to the room
-      await this.room.localParticipant.publishTrack(audioTrack, {
-        name: "simulated_audio",
+      const publication = await this.room.localParticipant.publishTrack(audioTrack, {
+        name: trackName,
         source: Track.Source.Microphone,
       });
 
-      console.log("Publishing audio buffer to call");
+      // Store publication for cleanup before next call
+      this.currentAudioPublication = publication;
+
+      console.log(`Publishing audio buffer to call (${trackName})`);
+
+      // Small delay to let LiveKit initialize the track
+      await new Promise(resolve => setTimeout(resolve, 100));
 
       // Start playback
       source.start(0);
@@ -201,14 +240,11 @@ export class RetellWebClient extends EventEmitter {
             source.disconnect();
             destination.disconnect();
             
-            // Unpublish the track
-            const publication = this.room.localParticipant.audioTrackPublications.get("simulated_audio");
-            if (publication) {
-              await this.room.localParticipant.unpublishTrack(audioTrack);
-            }
-            
             // Stop the track
             audioTrack.stop();
+            
+            // Note: We do NOT unpublish here - that happens at the start of the next sendAudioBuffer call
+            // or when stopCall() is called. This prevents race conditions.
             
             // Note: We do NOT close the AudioContext here - it's reused for subsequent calls
             // The AudioContext is only closed when stopCall() is called
