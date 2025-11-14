@@ -197,6 +197,10 @@ export class RetellWebClient extends EventEmitter {
           }
 
           try {
+            // Disconnect audio nodes BEFORE stopping track to prevent node accumulation
+            source.disconnect();
+            destination.disconnect();
+            
             // Unpublish the track
             const publication = this.room.localParticipant.audioTrackPublications.get("simulated_audio");
             if (publication) {
