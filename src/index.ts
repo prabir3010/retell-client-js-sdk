@@ -156,89 +156,6 @@ export class RetellWebClient extends EventEmitter {
     if (this.connected) this.room.localParticipant.setMicrophoneEnabled(true);
   }
 
-  /**
-   * Send audio chunk (PCM Int16Array) progressively for streaming
-   * This allows sending audio as it's generated, improving VAD and turn-taking
-   * @param pcmChunk Int16Array of PCM audio data at 24kHz
-   */
-  public async sendAudioChunk(pcmChunk: Int16Array): Promise<void> {
-    if (!this.connected) {
-      throw new Error("Cannot send audio chunk: not connected to call");
-    }
-
-    if (!this.audioContext) {
-      throw new Error("AudioContext not initialized. Make sure to set simulationMode: true in startCall()");
-    }
-
-    try {
-      // Resume AudioContext if suspended
-      if (this.audioContext.state === "suspended") {
-        await this.audioContext.resume();
-      }
-
-      // Convert PCM Int16Array to Float32Array
-      const float32Data = new Float32Array(pcmChunk.length);
-      for (let i = 0; i < pcmChunk.length; i++) {
-        float32Data[i] = pcmChunk[i] / 32768.0;
-      }
-
-      // Create AudioBuffer from the chunk
-      const audioBuffer = this.audioContext.createBuffer(1, float32Data.length, 24000);
-      const channelData = audioBuffer.getChannelData(0);
-      channelData.set(float32Data);
-
-      // Create buffer source node
-      const source = this.audioContext.createBufferSource();
-      source.buffer = audioBuffer;
-
-      // Create destination node
-      const destination = this.audioContext.createMediaStreamDestination();
-      source.connect(destination);
-
-      // Get audio track
-      const mediaStream = destination.stream;
-      const audioTrack = mediaStream.getAudioTracks()[0];
-
-      if (!audioTrack) {
-        throw new Error("Failed to create audio track from chunk");
-      }
-
-      // For streaming, we reuse the same track name
-      const trackName = "simulated_audio_stream";
-
-      // Only publish if we don't have a current publication, or unpublish and republish
-      if (!this.currentAudioPublication) {
-        const publication = await this.room.localParticipant.publishTrack(audioTrack, {
-          name: trackName,
-          source: Track.Source.Microphone,
-        });
-        this.currentAudioPublication = publication;
-        console.log(`📤 Published streaming track (${trackName})`);
-      }
-
-      // Start playback of this chunk
-      source.start(0);
-
-      // Wait for chunk to finish playing
-      await new Promise<void>((resolve) => {
-        source.onended = () => {
-          // Disconnect nodes
-          try {
-            source.disconnect();
-            destination.disconnect();
-          } catch (err) {
-            // Already disconnected
-          }
-          audioTrack.stop();
-          resolve();
-        };
-      });
-    } catch (err) {
-      console.error("Error sending audio chunk", err);
-      throw err;
-    }
-  }
-
   public async sendAudioBuffer(audioBuffer: AudioBuffer): Promise<void> {
     if (!this.connected) {
       throw new Error("Cannot send audio buffer: not connected to call");
@@ -297,9 +214,8 @@ export class RetellWebClient extends EventEmitter {
 
       console.log(`Publishing audio buffer to call (${trackName})`);
 
-      // Delay to let LiveKit and Retell's VAD initialize the track properly
-      // This prevents turn-taking confusion and premature agent responses
-      await new Promise(resolve => setTimeout(resolve, 400));
+      // Small delay to let LiveKit initialize the track
+      await new Promise(resolve => setTimeout(resolve, 100));
 
       // Start playback
       source.start(0);

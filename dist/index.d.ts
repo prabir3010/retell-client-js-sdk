@@ -26,7 +26,6 @@ export declare class RetellWebClient extends EventEmitter {
     stopCall(): void;
     mute(): void;
     unmute(): void;
-    sendAudioChunk(pcmChunk: Int16Array): Promise<void>;
     sendAudioBuffer(audioBuffer: AudioBuffer): Promise<void>;
     private captureAudioSamples;
     private handleRoomEvents;
