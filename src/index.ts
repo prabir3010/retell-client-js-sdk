@@ -51,6 +51,8 @@ export class RetellWebClient extends EventEmitter {
   public async startCall(startCallConfig: StartCallConfig): Promise<void> {
     try {
       // Room options
+
+      console.log("startCallConfig v1");
       this.room = new Room({
         audioCaptureDefaults: {
           autoGainControl: true,
