@@ -156,11 +156,6 @@ export class RetellWebClient extends EventEmitter {
     if (this.connected) this.room.localParticipant.setMicrophoneEnabled(true);
   }
 
-  /**
-   * Send audio buffer by simulating real microphone input (progressive chunks)
-   * This mimics how a real microphone sends audio progressively, not all at once
-   * This is crucial for Retell's VAD and turn-taking to work properly
-   */
   public async sendAudioBuffer(audioBuffer: AudioBuffer): Promise<void> {
     if (!this.connected) {
       throw new Error("Cannot send audio buffer: not connected to call");
@@ -171,7 +166,7 @@ export class RetellWebClient extends EventEmitter {
     }
 
     try {
-      // Unpublish previous track if exists
+      // Unpublish previous track if it exists to avoid conflicts
       if (this.currentAudioPublication) {
         try {
           await this.room.localParticipant.unpublishTrack(this.currentAudioPublication.track);
@@ -182,106 +177,102 @@ export class RetellWebClient extends EventEmitter {
         this.currentAudioPublication = undefined;
       }
 
-      // Resume AudioContext if suspended
+      // Resume AudioContext if suspended (browser autoplay policy)
       if (this.audioContext.state === "suspended") {
         await this.audioContext.resume();
       }
 
-      console.log(`Starting progressive audio streaming (${audioBuffer.duration.toFixed(2)}s)`);
+      // Create buffer source node from reused AudioContext
+      const source = this.audioContext.createBufferSource();
+      source.buffer = audioBuffer;
 
-      // Create MediaStream destination
+      // Create destination node to get MediaStream
       const destination = this.audioContext.createMediaStreamDestination();
+
+      // Connect source to destination
+      source.connect(destination);
+
+      // Get the MediaStream from the destination
       const mediaStream = destination.stream;
       const audioTrack = mediaStream.getAudioTracks()[0];
 
       if (!audioTrack) {
-        throw new Error("Failed to create audio track");
+        throw new Error("Failed to create audio track from buffer");
       }
 
-      // Publish track once
+      // Generate unique track name to avoid conflicts
       const trackName = `simulated_audio_${this.audioTrackCounter++}`;
+
+      // Publish the track to the room
       const publication = await this.room.localParticipant.publishTrack(audioTrack, {
         name: trackName,
         source: Track.Source.Microphone,
       });
+
+      // Store publication for cleanup before next call
       this.currentAudioPublication = publication;
 
-      console.log(`Published progressive audio track (${trackName})`);
+      console.log(`Publishing audio buffer to call (${trackName})`);
 
-      // Small delay for VAD initialization
-      await new Promise(resolve => setTimeout(resolve, 200));
+      // Small delay to let LiveKit initialize the track
+      await new Promise(resolve => setTimeout(resolve, 100));
 
-      // Send audio progressively in small chunks (simulating real mic)
-      await this.sendAudioProgressively(audioBuffer, destination);
+      // Start playback
+      source.start(0);
 
-      // Cleanup
-      destination.disconnect();
-      audioTrack.stop();
+      // Cleanup after playback completes
+      return new Promise((resolve, reject) => {
+        let timeoutId: number | null = null;
+        let isCleanedUp = false;
 
-      console.log("Progressive audio streaming completed");
+        const cleanup = async (isError: boolean = false) => {
+          if (isCleanedUp) return;
+          isCleanedUp = true;
+
+          // Clear timeout if it exists
+          if (timeoutId !== null) {
+            clearTimeout(timeoutId);
+            timeoutId = null;
+          }
+
+          try {
+            // Disconnect audio nodes BEFORE stopping track to prevent node accumulation
+            source.disconnect();
+            destination.disconnect();
+            
+            // Stop the track
+            audioTrack.stop();
+            
+            // Note: We do NOT unpublish here - that happens at the start of the next sendAudioBuffer call
+            // or when stopCall() is called. This prevents race conditions.
+            
+            // Note: We do NOT close the AudioContext here - it's reused for subsequent calls
+            // The AudioContext is only closed when stopCall() is called
+            
+            if (isError) {
+              reject(new Error("Audio buffer playback timeout"));
+            } else {
+              console.log("Audio buffer playback completed");
+              resolve();
+            }
+          } catch (err) {
+            console.error("Error cleaning up audio buffer", err);
+            reject(err);
+          }
+        };
+
+        source.onended = () => cleanup(false);
+
+        // Safety timeout
+        timeoutId = window.setTimeout(() => {
+          console.warn("Audio buffer playback timeout");
+          cleanup(true);
+        }, (audioBuffer.duration + 5) * 1000);
+      });
     } catch (err) {
       console.error("Error sending audio buffer", err);
       throw err;
     }
-  }
-
-  /**
-   * Send audio buffer progressively in small chunks to simulate real microphone
-   * This is KEY for proper Retell VAD and turn-taking behavior
-   */
-  private async sendAudioProgressively(
-    audioBuffer: AudioBuffer,
-    destination: MediaStreamAudioDestinationNode
-  ): Promise<void> {
-    const sampleRate = audioBuffer.sampleRate;
-    const channelData = audioBuffer.getChannelData(0);
-    
-    // Chunk size: 20ms of audio (mimics real-time mic input)
-    const chunkDurationMs = 20;
-    const chunkSizeInSamples = Math.floor((sampleRate * chunkDurationMs) / 1000);
-    
-    const totalSamples = channelData.length;
-    const numChunks = Math.ceil(totalSamples / chunkSizeInSamples);
-    
-    console.log(`  Sending ${numChunks} chunks (${chunkDurationMs}ms each)...`);
-
-    let offset = 0;
-    const startTime = this.audioContext!.currentTime;
-
-    for (let i = 0; i < numChunks; i++) {
-      const chunkSize = Math.min(chunkSizeInSamples, totalSamples - offset);
-      
-      // Create small buffer for this chunk
-      const chunkBuffer = this.audioContext!.createBuffer(
-        1,
-        chunkSize,
-        sampleRate
-      );
-      
-      // Copy chunk data
-      const chunkChannelData = chunkBuffer.getChannelData(0);
-      for (let j = 0; j < chunkSize; j++) {
-        chunkChannelData[j] = channelData[offset + j];
-      }
-      
-      // Create source for this chunk
-      const source = this.audioContext!.createBufferSource();
-      source.buffer = chunkBuffer;
-      source.connect(destination);
-      
-      // Schedule this chunk to play at the right time
-      const playTime = startTime + (i * chunkDurationMs) / 1000;
-      source.start(playTime);
-      
-      offset += chunkSize;
-      
-      // Wait for chunk duration before sending next chunk (real-time simulation)
-      await new Promise(resolve => setTimeout(resolve, chunkDurationMs));
-    }
-
-    // Wait for final chunk to finish playing
-    const finalChunkDuration = ((totalSamples % chunkSizeInSamples) || chunkSizeInSamples) / sampleRate * 1000;
-    await new Promise(resolve => setTimeout(resolve, finalChunkDuration + 100));
   }
 
   private captureAudioSamples() {
