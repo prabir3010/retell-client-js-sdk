@@ -20,6 +20,7 @@ export interface StartCallConfig {
   captureDeviceId?: string; // specific sink id for audio capture device
   playbackDeviceId?: string; // specific sink id for audio playback device
   emitRawAudioSamples?: boolean; // receive raw float32 audio samples (ex. for animation). Default to false.
+  simulationMode?: boolean; // If true, disables microphone and allows custom audio publishing
 }
 
 export class RetellWebClient extends EventEmitter {
@@ -70,8 +71,10 @@ export class RetellWebClient extends EventEmitter {
       await this.room.connect(hostUrl, startCallConfig.accessToken);
       console.log("connected to room", this.room.name);
 
-      // Turns microphone track on
-      this.room.localParticipant.setMicrophoneEnabled(true);
+      // Turns microphone track on (unless in simulation mode)
+      if (!startCallConfig.simulationMode) {
+        this.room.localParticipant.setMicrophoneEnabled(true);
+      }
       this.connected = true;
       this.emit("call_started");
     } catch (err) {
@@ -116,6 +119,89 @@ export class RetellWebClient extends EventEmitter {
 
   public unmute(): void {
     if (this.connected) this.room.localParticipant.setMicrophoneEnabled(true);
+  }
+
+  public async sendAudioBuffer(audioBuffer: AudioBuffer): Promise<void> {
+    if (!this.connected) {
+      throw new Error("Cannot send audio buffer: not connected to call");
+    }
+
+    try {
+      // Create audio context with 24kHz sample rate (matches Retell requirements)
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({
+        sampleRate: 24000
+      });
+
+      // Create buffer source node
+      const source = audioContext.createBufferSource();
+      source.buffer = audioBuffer;
+
+      // Create destination node to get MediaStream
+      const destination = audioContext.createMediaStreamDestination();
+
+      // Connect source to destination
+      source.connect(destination);
+
+      // Get the MediaStream from the destination
+      const mediaStream = destination.stream;
+      const audioTrack = mediaStream.getAudioTracks()[0];
+
+      if (!audioTrack) {
+        throw new Error("Failed to create audio track from buffer");
+      }
+
+      // Publish the track to the room
+      await this.room.localParticipant.publishTrack(audioTrack, {
+        name: "simulated_audio",
+        source: Track.Source.Microphone,
+      });
+
+      console.log("Publishing audio buffer to call");
+
+      // Start playback
+      source.start(0);
+
+      // Cleanup after playback completes
+      return new Promise((resolve, reject) => {
+        source.onended = async () => {
+          try {
+            console.log("Audio buffer playback completed");
+            
+            // Unpublish the track
+            const publication = this.room.localParticipant.audioTrackPublications.get("simulated_audio");
+            if (publication) {
+              await this.room.localParticipant.unpublishTrack(audioTrack);
+            }
+            
+            // Stop the track
+            audioTrack.stop();
+            
+            // Close audio context
+            await audioContext.close();
+            
+            resolve();
+          } catch (err) {
+            console.error("Error cleaning up audio buffer", err);
+            reject(err);
+          }
+        };
+
+        // Safety timeout
+        setTimeout(async () => {
+          console.warn("Audio buffer playback timeout");
+          try {
+            audioTrack.stop();
+            await audioContext.close();
+          } catch (err) {
+            console.error("Error in timeout cleanup", err);
+          }
+          reject(new Error("Audio buffer playback timeout"));
+        }, (audioBuffer.duration + 5) * 1000);
+      });
+    } catch (err) {
+      console.error("Error sending audio buffer", err);
+      throw err;
+    }
   }
 
   private captureAudioSamples() {

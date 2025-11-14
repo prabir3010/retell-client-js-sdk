@@ -5,6 +5,7 @@ export interface StartCallConfig {
     captureDeviceId?: string;
     playbackDeviceId?: string;
     emitRawAudioSamples?: boolean;
+    simulationMode?: boolean;
 }
 export declare class RetellWebClient extends EventEmitter {
     private room;
@@ -22,6 +23,7 @@ export declare class RetellWebClient extends EventEmitter {
     stopCall(): void;
     mute(): void;
     unmute(): void;
+    sendAudioBuffer(audioBuffer: AudioBuffer): Promise<void>;
     private captureAudioSamples;
     private handleRoomEvents;
     private handleAudioEvents;
