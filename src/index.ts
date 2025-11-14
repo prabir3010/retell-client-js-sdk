@@ -40,6 +40,9 @@ export class RetellWebClient extends EventEmitter {
     cleanup: () => Promise<void>;
   };
   private captureAudioFrame: number;
+  
+  // AudioContext for simulation mode - reused across multiple sendAudioBuffer calls
+  private audioContext?: AudioContext;
 
   constructor() {
     super();
@@ -74,6 +77,11 @@ export class RetellWebClient extends EventEmitter {
       // Turns microphone track on (unless in simulation mode)
       if (!startCallConfig.simulationMode) {
         this.room.localParticipant.setMicrophoneEnabled(true);
+      } else {
+        // Create AudioContext once for simulation mode
+        this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({
+          sampleRate: 24000
+        });
       }
       this.connected = true;
       this.emit("call_started");
@@ -111,6 +119,12 @@ export class RetellWebClient extends EventEmitter {
       window.cancelAnimationFrame(this.captureAudioFrame);
       delete this.captureAudioFrame;
     }
+
+    // Close AudioContext if it exists
+    if (this.audioContext && this.audioContext.state !== "closed") {
+      this.audioContext.close();
+      delete this.audioContext;
+    }
   }
 
   public mute(): void {
@@ -126,18 +140,22 @@ export class RetellWebClient extends EventEmitter {
       throw new Error("Cannot send audio buffer: not connected to call");
     }
 
-    try {
-      // Create audio context with 24kHz sample rate (matches Retell requirements)
-      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({
-        sampleRate: 24000
-      });
+    if (!this.audioContext) {
+      throw new Error("AudioContext not initialized. Make sure to set simulationMode: true in startCall()");
+    }
 
-      // Create buffer source node
-      const source = audioContext.createBufferSource();
+    try {
+      // Resume AudioContext if suspended (browser autoplay policy)
+      if (this.audioContext.state === "suspended") {
+        await this.audioContext.resume();
+      }
+
+      // Create buffer source node from reused AudioContext
+      const source = this.audioContext.createBufferSource();
       source.buffer = audioBuffer;
 
       // Create destination node to get MediaStream
-      const destination = audioContext.createMediaStreamDestination();
+      const destination = this.audioContext.createMediaStreamDestination();
 
       // Connect source to destination
       source.connect(destination);
@@ -186,10 +204,8 @@ export class RetellWebClient extends EventEmitter {
             // Stop the track
             audioTrack.stop();
             
-            // Close audio context only if not already closed
-            if (audioContext.state !== "closed") {
-              await audioContext.close();
-            }
+            // Note: We do NOT close the AudioContext here - it's reused for subsequent calls
+            // The AudioContext is only closed when stopCall() is called
             
             if (isError) {
               reject(new Error("Audio buffer playback timeout"));
