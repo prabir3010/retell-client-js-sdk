@@ -163,10 +163,20 @@ export class RetellWebClient extends EventEmitter {
 
       // Cleanup after playback completes
       return new Promise((resolve, reject) => {
-        source.onended = async () => {
+        let timeoutId: number | null = null;
+        let isCleanedUp = false;
+
+        const cleanup = async (isError: boolean = false) => {
+          if (isCleanedUp) return;
+          isCleanedUp = true;
+
+          // Clear timeout if it exists
+          if (timeoutId !== null) {
+            clearTimeout(timeoutId);
+            timeoutId = null;
+          }
+
           try {
-            console.log("Audio buffer playback completed");
-            
             // Unpublish the track
             const publication = this.room.localParticipant.audioTrackPublications.get("simulated_audio");
             if (publication) {
@@ -176,26 +186,29 @@ export class RetellWebClient extends EventEmitter {
             // Stop the track
             audioTrack.stop();
             
-            // Close audio context
-            await audioContext.close();
+            // Close audio context only if not already closed
+            if (audioContext.state !== "closed") {
+              await audioContext.close();
+            }
             
-            resolve();
+            if (isError) {
+              reject(new Error("Audio buffer playback timeout"));
+            } else {
+              console.log("Audio buffer playback completed");
+              resolve();
+            }
           } catch (err) {
             console.error("Error cleaning up audio buffer", err);
             reject(err);
           }
         };
 
+        source.onended = () => cleanup(false);
+
         // Safety timeout
-        setTimeout(async () => {
+        timeoutId = window.setTimeout(() => {
           console.warn("Audio buffer playback timeout");
-          try {
-            audioTrack.stop();
-            await audioContext.close();
-          } catch (err) {
-            console.error("Error in timeout cleanup", err);
-          }
-          reject(new Error("Audio buffer playback timeout"));
+          cleanup(true);
         }, (audioBuffer.duration + 5) * 1000);
       });
     } catch (err) {
